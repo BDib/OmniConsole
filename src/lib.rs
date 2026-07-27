@@ -3,3 +3,6 @@ pub mod terminal;
 pub mod bidi;
 pub mod ui;
 pub mod config;
+
+#[cfg(test)]
+mod tests;

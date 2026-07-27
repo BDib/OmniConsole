@@ -10,6 +10,7 @@ use crate::config::theme::Theme as AppTheme;
 use crate::pty::{Pty, PtyEvent};
 use crate::terminal::{Direction, Screen};
 use crate::bidi::reorder::get_display_cells;
+use crate::bidi::detector::is_rtl_char;
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -145,6 +146,15 @@ impl OmniConsole {
                     }
                     iced::Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
                         Some(Message::MouseScrolled(delta))
+                    }
+                    iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+                        let path_str = path.to_string_lossy().to_string();
+                        let formatted_path = if path_str.contains(' ') {
+                            format!("\"{}\" ", path_str)
+                        } else {
+                            format!("{} ", path_str)
+                        };
+                        Some(Message::TerminalInput(formatted_path))
                     }
                     _ => None,
                 }
@@ -563,6 +573,12 @@ impl OmniConsole {
                         display_cell.cell.ch
                     };
 
+                    let use_font = if is_rtl_char(ch) {
+                        iced::Font::default()
+                    } else {
+                        terminal_font
+                    };
+
                     let cell = &display_cell.cell;
                     let (fg_color, _bg_color) = self.cell_colors(cell, &theme);
 
@@ -571,7 +587,7 @@ impl OmniConsole {
                     let rendered: Element<'_, Message> = if is_cursor {
                         // Cursor: white block with dark character
                         let cursor_char = if ch == ' ' { ' ' } else { ch };
-                        container(text(cursor_char.to_string()).size(font_size).font(terminal_font).color(iced::Color::from_rgb(0.0, 0.0, 0.0)))
+                        container(text(cursor_char.to_string()).size(font_size).font(use_font).color(iced::Color::from_rgb(0.0, 0.0, 0.0)))
                             .style(|_theme: &iced::Theme| iced::widget::container::Style {
                                 background: Some(iced::Color::from_rgb(0.9, 0.9, 0.9).into()),
                                 ..Default::default()
@@ -580,7 +596,7 @@ impl OmniConsole {
                     } else {
                         text(ch.to_string())
                             .size(font_size)
-                            .font(terminal_font)
+                            .font(use_font)
                             .color(fg_color)
                             .into()
                     };
