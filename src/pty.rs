@@ -2,6 +2,8 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::{Read, Write};
 use std::thread;
 
+/// Represents an active Pseudo-Terminal (PTY) session, wrapping a platform-native Master/Slave pair
+/// and managing input/output operations to the shell subprocess.
 pub struct Pty {
     writer: Box<dyn Write + Send>,
     reader: Option<Box<dyn Read + Send>>,
@@ -12,8 +14,11 @@ pub struct Pty {
     size: PtySize,
 }
 
+/// Events emitted by the asynchronous PTY reader thread.
 pub enum PtyEvent {
+    /// Received standard output data from the shell subprocess.
     Output(String),
+    /// Subprocess has exited or closed the terminal interface.
     Exited,
 }
 
