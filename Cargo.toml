@@ -1,0 +1,20 @@
+[package]
+name = "omniconsole"
+version = "0.1.0"
+edition = "2021"
+description = "A fast terminal emulator with RTL support"
+
+[dependencies]
+iced = { version = "0.13", features = ["tokio"] }
+portable-pty = "0.8"
+unicode-bidi = "0.3"
+unicode-segmentation = "1.10"
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+dirs = "5.0"
+tokio = { version = "1.0", features = ["full"] }
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = 3
