@@ -146,7 +146,8 @@ impl Parser {
                         }
                         ch => {
                             let cell = self.make_cell(ch);
-                            buffer.set_cell(*cursor_x as usize, *cursor_y as usize, cell);
+                            let actual_y = buffer.actual_y(*cursor_y as usize);
+                            buffer.set_cell(*cursor_x as usize, actual_y, cell);
                             *cursor_x += 1;
                             if *cursor_x >= buffer.cols {
                                 *cursor_x = 0;
@@ -253,17 +254,39 @@ impl Parser {
                             let param = self.params.first().copied().unwrap_or(0);
                             match param {
                                 0 => {
-                                    for y in *cursor_y as usize..buffer.rows as usize {
-                                        buffer.clear_line(y);
+                                    if let Some(line) = buffer.get_line_mut(buffer.actual_y(*cursor_y as usize)) {
+                                        for x in *cursor_x as usize..line.cells.len() {
+                                            line.cells[x] = Cell::default();
+                                        }
+                                    }
+                                    for y in (*cursor_y as usize + 1)..buffer.rows as usize {
+                                        let actual_y = buffer.actual_y(y);
+                                        buffer.clear_line(actual_y);
                                     }
                                 }
                                 1 => {
-                                    for y in 0..=*cursor_y as usize {
-                                        buffer.clear_line(y);
+                                    for y in 0..*cursor_y as usize {
+                                        let actual_y = buffer.actual_y(y);
+                                        buffer.clear_line(actual_y);
+                                    }
+                                    if let Some(line) = buffer.get_line_mut(buffer.actual_y(*cursor_y as usize)) {
+                                        for x in 0..=*cursor_x as usize {
+                                            line.cells[x] = Cell::default();
+                                        }
                                     }
                                 }
-                                2 | 3 => {
-                                    buffer.clear();
+                                2 => {
+                                    for y in 0..buffer.rows as usize {
+                                        let actual_y = buffer.actual_y(y);
+                                        buffer.clear_line(actual_y);
+                                    }
+                                }
+                                3 => {
+                                    // Clear scrollback
+                                    let viewport_top = buffer.lines.len().saturating_sub(buffer.rows as usize);
+                                    if viewport_top > 0 {
+                                        buffer.lines.drain(0..viewport_top);
+                                    }
                                 }
                                 _ => {}
                             }
@@ -272,23 +295,24 @@ impl Parser {
                         'K' => {
                             self.push_final_param();
                             let param = self.params.first().copied().unwrap_or(0);
+                            let actual_y = buffer.actual_y(*cursor_y as usize);
                             match param {
                                 0 => {
-                                    if let Some(line) = buffer.get_line_mut(*cursor_y as usize) {
+                                    if let Some(line) = buffer.get_line_mut(actual_y) {
                                         for x in *cursor_x as usize..line.cells.len() {
                                             line.cells[x] = Cell::default();
                                         }
                                     }
                                 }
                                 1 => {
-                                    if let Some(line) = buffer.get_line_mut(*cursor_y as usize) {
+                                    if let Some(line) = buffer.get_line_mut(actual_y) {
                                         for x in 0..=*cursor_x as usize {
                                             line.cells[x] = Cell::default();
                                         }
                                     }
                                 }
                                 2 => {
-                                    buffer.clear_line(*cursor_y as usize);
+                                    buffer.clear_line(actual_y);
                                 }
                                 _ => {}
                             }
@@ -298,28 +322,30 @@ impl Parser {
                             self.push_final_param();
                             let param = self.params.first().copied().unwrap_or(1);
                             let cols = buffer.cols;
+                            let actual_y = buffer.actual_y(*cursor_y as usize);
+                            let bottom_idx = buffer.actual_y(buffer.rows as usize - 1);
                             for _ in 0..param {
-                                let new_line = super::buffer::Line::new(cols);
-                                buffer.lines.insert(*cursor_y as usize, new_line);
-                            }
-                            let max_lines = buffer.rows as usize + buffer.scrollback;
-                            while buffer.lines.len() > max_lines {
-                                buffer.lines.pop();
+                                if actual_y <= bottom_idx {
+                                    let new_line = super::buffer::Line::new(cols);
+                                    buffer.lines.insert(actual_y, new_line);
+                                    if bottom_idx + 1 < buffer.lines.len() {
+                                        buffer.lines.remove(bottom_idx + 1);
+                                    }
+                                }
                             }
                             self.state = ParserState::Ground;
                         }
                         'M' => {
                             self.push_final_param();
                             let param = self.params.first().copied().unwrap_or(1);
-                            for _ in 0..param {
-                                if (*cursor_y as usize) < buffer.lines.len() {
-                                    buffer.lines.remove(*cursor_y as usize);
-                                }
-                            }
                             let cols = buffer.cols;
-                            let rows = buffer.rows as usize;
-                            while buffer.lines.len() < rows {
-                                buffer.lines.push(super::buffer::Line::new(cols));
+                            let actual_y = buffer.actual_y(*cursor_y as usize);
+                            let bottom_idx = buffer.actual_y(buffer.rows as usize - 1);
+                            for _ in 0..param {
+                                if actual_y <= bottom_idx && actual_y < buffer.lines.len() {
+                                    buffer.lines.remove(actual_y);
+                                    buffer.lines.insert(bottom_idx, super::buffer::Line::new(cols));
+                                }
                             }
                             self.state = ParserState::Ground;
                         }
@@ -327,7 +353,8 @@ impl Parser {
                             self.push_final_param();
                             let param = self.params.first().copied().unwrap_or(1);
                             let cols = buffer.cols as usize;
-                            if let Some(line) = buffer.get_line_mut(*cursor_y as usize) {
+                            let actual_y = buffer.actual_y(*cursor_y as usize);
+                            if let Some(line) = buffer.get_line_mut(actual_y) {
                                 let start = *cursor_x as usize;
                                 let end = (start + param as usize).min(line.cells.len());
                                 line.cells.drain(start..end);
@@ -347,17 +374,21 @@ impl Parser {
                             self.push_final_param();
                             let param = self.params.first().copied().unwrap_or(1);
                             let cols = buffer.cols;
-                            let rows = buffer.rows as usize;
+                            let top_y = buffer.actual_y(0);
+                            let bottom_idx = buffer.actual_y(buffer.rows as usize - 1);
                             for _ in 0..param {
-                                buffer.lines.remove(0);
-                                buffer.lines.insert(rows - 1, super::buffer::Line::new(cols));
+                                buffer.lines.insert(top_y, super::buffer::Line::new(cols));
+                                if bottom_idx + 1 < buffer.lines.len() {
+                                    buffer.lines.remove(bottom_idx + 1);
+                                }
                             }
                             self.state = ParserState::Ground;
                         }
                         'X' => {
                             self.push_final_param();
                             let param = self.params.first().copied().unwrap_or(1);
-                            if let Some(line) = buffer.get_line_mut(*cursor_y as usize) {
+                            let actual_y = buffer.actual_y(*cursor_y as usize);
+                            if let Some(line) = buffer.get_line_mut(actual_y) {
                                 let start = *cursor_x as usize;
                                 let end = (start + param as usize).min(line.cells.len());
                                 for cell in &mut line.cells[start..end] {
@@ -369,7 +400,8 @@ impl Parser {
                         '@' => {
                             self.push_final_param();
                             let param = self.params.first().copied().unwrap_or(1);
-                            if let Some(line) = buffer.get_line_mut(*cursor_y as usize) {
+                            let actual_y = buffer.actual_y(*cursor_y as usize);
+                            if let Some(line) = buffer.get_line_mut(actual_y) {
                                 let start = *cursor_x as usize;
                                 let insert_count = param as usize;
                                 for i in (start..line.cells.len() - insert_count).rev() {

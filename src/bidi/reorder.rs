@@ -19,17 +19,23 @@ fn reorder_for_display(cells: &[Cell], direction: Direction) -> Vec<(usize, Cell
         return vec![];
     }
 
-    let text: String = cells.iter().map(|c| c.ch).collect();
+    let orig_text: String = cells.iter().map(|c| c.ch).collect();
+    let reshaped_text = arabic_reshaper::arabic_reshape(&orig_text);
+
+    let mut reshaped_cells = cells.to_vec();
+    for (cell, reshaped_ch) in reshaped_cells.iter_mut().zip(reshaped_text.chars()) {
+        cell.ch = reshaped_ch;
+    }
     
     match direction {
         Direction::LTR => {
-            cells.iter().enumerate().map(|(i, c)| (i, *c)).collect()
+            reshaped_cells.iter().enumerate().map(|(i, c)| (i, *c)).collect()
         }
         Direction::RTL => {
-            reorder_rtl(cells, &text)
+            reorder_rtl(&reshaped_cells, &reshaped_text)
         }
         Direction::Auto => {
-            apply_bidi_algorithm(cells, &text)
+            apply_bidi_algorithm(&reshaped_cells, &reshaped_text)
         }
     }
 }

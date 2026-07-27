@@ -10,6 +10,7 @@ use crate::config::theme::Theme as AppTheme;
 use crate::pty::{Pty, PtyEvent};
 use crate::terminal::{Direction, Screen};
 use crate::bidi::reorder::get_display_cells;
+use crate::bidi::detector::is_rtl_char;
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -23,6 +24,12 @@ pub enum Message {
     UpdateSettings(Settings),
     Tick,
     KeyPressed(iced::keyboard::Event),
+    MouseScrolled(iced::mouse::ScrollDelta),
+    FontFamilyChanged(String),
+    FontSizeChanged(String),
+    ThemeChanged(String),
+    DefaultProfileChanged(String),
+    ClipboardPasted(Option<String>),
 }
 
 pub struct OmniConsole {
@@ -31,6 +38,7 @@ pub struct OmniConsole {
     pub settings: Settings,
     pub show_settings: bool,
     pub pty_receivers: Vec<Option<mpsc::Receiver<PtyEvent>>>,
+    pub font_family_static: &'static str,
 }
 
 pub struct Tab {
@@ -38,6 +46,7 @@ pub struct Tab {
     pub pty: Option<Pty>,
     pub title: String,
     pub rtl_mode: bool,
+    pub scroll_offset: usize,
 }
 
 impl Tab {
@@ -47,6 +56,7 @@ impl Tab {
             pty: None,
             title,
             rtl_mode: false,
+            scroll_offset: 0,
         }
     }
 }
@@ -59,29 +69,56 @@ impl OmniConsole {
             .run_with(Self::new)
     }
 
+    fn get_active_theme(&self) -> AppTheme {
+        match self.settings.active_theme.as_str() {
+            "Default" => AppTheme::dark(),
+            "Light" => AppTheme::light(),
+            "Dracula" => AppTheme::dracula(),
+            _ => {
+                if let Some(theme) = self.settings.themes.iter().find(|t| t.name == self.settings.active_theme) {
+                    theme.clone()
+                } else {
+                    AppTheme::dark()
+                }
+            }
+        }
+    }
+
     fn new() -> (Self, Task<Message>) {
         let settings = Settings::load();
+        let font_family_static = Box::leak(settings.font_family.clone().into_boxed_str());
         let mut app = OmniConsole {
             tabs: vec![],
             active_tab: 0,
             settings,
             show_settings: false,
             pty_receivers: vec![],
+            font_family_static,
         };
 
-        app.create_tab("PowerShell".to_string());
+        app.create_tab("".to_string());
         
         (app, Task::none())
     }
 
-    pub fn create_tab(&mut self, title: String) {
+    pub fn create_tab(&mut self, mut title: String) {
         let cols = 80;
         let rows = 24;
         let scrollback = self.settings.scrollback_lines;
         
+        let profile = self.settings.profiles.iter()
+            .find(|p| p.name == self.settings.default_profile)
+            .or_else(|| self.settings.profiles.first())
+            .unwrap()
+            .clone();
+
+        if title.is_empty() || title.starts_with("Terminal") || title == "PowerShell" {
+            title = profile.name.clone();
+        }
+
         let mut tab = Tab::new(cols, rows, scrollback, title);
+        tab.rtl_mode = self.settings.default_rtl_mode;
         
-        let profile = self.settings.profiles.first().unwrap();
         match Pty::new(&profile.command, &profile.args, cols, rows) {
             Ok(pty) => {
                 let (rx, pty) = pty.spawn_reader();
@@ -106,6 +143,18 @@ impl OmniConsole {
                 match event {
                     iced::Event::Keyboard(keyboard_event) => {
                         Some(Message::KeyPressed(keyboard_event))
+                    }
+                    iced::Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
+                        Some(Message::MouseScrolled(delta))
+                    }
+                    iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+                        let path_str = path.to_string_lossy().to_string();
+                        let formatted_path = if path_str.contains(' ') {
+                            format!("\"{}\" ", path_str)
+                        } else {
+                            format!("{} ", path_str)
+                        };
+                        Some(Message::TerminalInput(formatted_path))
                     }
                     _ => None,
                 }
@@ -152,16 +201,49 @@ impl OmniConsole {
                 self.show_settings = false;
             }
             Message::UpdateSettings(settings) => {
+                self.font_family_static = Box::leak(settings.font_family.clone().into_boxed_str());
                 self.settings = settings;
                 self.settings.save();
                 self.show_settings = false;
             }
+            Message::FontFamilyChanged(family) => {
+                self.font_family_static = Box::leak(family.clone().into_boxed_str());
+                self.settings.font_family = family;
+                self.settings.save();
+            }
+            Message::FontSizeChanged(size_str) => {
+                if let Ok(size) = size_str.parse::<u16>() {
+                    self.settings.font_size = size;
+                    self.settings.save();
+                }
+            }
+            Message::ThemeChanged(theme_name) => {
+                self.settings.active_theme = theme_name;
+                self.settings.save();
+            }
+            Message::DefaultProfileChanged(profile_name) => {
+                self.settings.default_profile = profile_name;
+                self.settings.save();
+            }
+            Message::ClipboardPasted(Some(text)) => {
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    if let Some(pty) = &mut tab.pty {
+                        let _ = pty.write_str(&text);
+                    }
+                }
+            }
+            Message::ClipboardPasted(None) => {}
             Message::KeyPressed(event) => {
                 if self.show_settings {
                     return Task::none();
                 }
 
                 if let iced::keyboard::Event::KeyPressed { key, text, modifiers, .. } = event {
+                    // Ctrl+V: Paste from clipboard
+                    if key == keyboard::Key::Character("v".into()) && modifiers.control() {
+                        return iced::clipboard::read().map(Message::ClipboardPasted);
+                    }
+
                     // Ctrl+T: New tab
                     if key == keyboard::Key::Character("t".into()) && modifiers.control() {
                         return Task::perform(async {}, |_| Message::NewTab);
@@ -181,6 +263,34 @@ impl OmniConsole {
                     // Ctrl+,: Settings
                     if key == keyboard::Key::Character(",".into()) && modifiers.control() {
                         return Task::perform(async {}, |_| Message::OpenSettings);
+                    }
+
+                    // Shift+PageUp / Shift+PageDown: Scroll
+                    if key == keyboard::Key::Named(Named::PageUp) && modifiers.shift() {
+                        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                            let max_offset = tab.screen.buffer.lines.len().saturating_sub(tab.screen.buffer.rows as usize);
+                            tab.scroll_offset = (tab.scroll_offset + 10).min(max_offset);
+                            return Task::none();
+                        }
+                    }
+                    if key == keyboard::Key::Named(Named::PageDown) && modifiers.shift() {
+                        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                            tab.scroll_offset = tab.scroll_offset.saturating_sub(10);
+                            return Task::none();
+                        }
+                    }
+
+                    // Ctrl + [a-z]: control characters
+                    if modifiers.control() && !modifiers.alt() && !modifiers.logo() {
+                        if let keyboard::Key::Character(ch_str) = &key {
+                            if let Some(ch) = ch_str.chars().next() {
+                                let ch_lower = ch.to_ascii_lowercase();
+                                if ('a'..='z').contains(&ch_lower) {
+                                    let ascii_val = (ch_lower as u8 - b'a' + 1) as char;
+                                    return Task::perform(async move { ascii_val.to_string() }, Message::TerminalInput);
+                                }
+                            }
+                        }
                     }
 
                     // Handle regular typing
@@ -213,6 +323,24 @@ impl OmniConsole {
                     return Task::perform(async move { input }, Message::TerminalInput);
                 }
             }
+            Message::MouseScrolled(delta) => {
+                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                    let lines = match delta {
+                        iced::mouse::ScrollDelta::Lines { y, .. } => y,
+                        iced::mouse::ScrollDelta::Pixels { y, .. } => {
+                            if y > 0.0 { 1.0 } else if y < 0.0 { -1.0 } else { 0.0 }
+                        }
+                    };
+
+                    let scroll_amount = lines.round() as i32;
+                    if scroll_amount > 0 {
+                        let max_offset = tab.screen.buffer.lines.len().saturating_sub(tab.screen.buffer.rows as usize);
+                        tab.scroll_offset = (tab.scroll_offset + scroll_amount as usize).min(max_offset);
+                    } else if scroll_amount < 0 {
+                        tab.scroll_offset = tab.scroll_offset.saturating_sub(-scroll_amount as usize);
+                    }
+                }
+            }
             Message::Tick => {
                 for (i, rx) in self.pty_receivers.iter_mut().enumerate() {
                     if let Some(rx) = rx {
@@ -220,7 +348,14 @@ impl OmniConsole {
                             match event {
                                 PtyEvent::Output(output) => {
                                     if let Some(tab) = self.tabs.get_mut(i) {
+                                        let old_len = tab.screen.buffer.lines.len();
                                         tab.screen.process_input(&output);
+                                        let new_len = tab.screen.buffer.lines.len();
+                                        if tab.scroll_offset > 0 && new_len > old_len {
+                                            tab.scroll_offset += new_len - old_len;
+                                            let max_offset = tab.screen.buffer.lines.len().saturating_sub(tab.screen.buffer.rows as usize);
+                                            tab.scroll_offset = tab.scroll_offset.min(max_offset);
+                                        }
                                     }
                                 }
                                 PtyEvent::Exited => {
@@ -249,15 +384,52 @@ impl OmniConsole {
     fn settings_view(&self) -> Element<'_, Message> {
         let title = text("Settings").size(24);
         
+        let mut available_themes = vec!["Default".to_string(), "Light".to_string(), "Dracula".to_string()];
+        for theme in &self.settings.themes {
+            if !available_themes.contains(&theme.name) {
+                available_themes.push(theme.name.clone());
+            }
+        }
+
+        let mut theme_buttons = row![].spacing(8);
+        for theme_name in &available_themes {
+            let is_active = theme_name == &self.settings.active_theme;
+            theme_buttons = theme_buttons.push(
+                button(text(theme_name.clone()))
+                    .on_press(Message::ThemeChanged(theme_name.clone()))
+                    .style(if is_active {
+                        iced::widget::button::primary
+                    } else {
+                        iced::widget::button::secondary
+                    })
+            );
+        }
+
+        let mut profile_buttons = row![].spacing(8);
+        for profile in &self.settings.profiles {
+            let is_default = profile.name == self.settings.default_profile;
+            profile_buttons = profile_buttons.push(
+                button(text(profile.name.clone()))
+                    .on_press(Message::DefaultProfileChanged(profile.name.clone()))
+                    .style(if is_default {
+                        iced::widget::button::primary
+                    } else {
+                        iced::widget::button::secondary
+                    })
+            );
+        }
+
         let general_section = column![
             text("General").size(18),
             row![
                 text("Font Family:"),
-                iced::widget::text_input("Cascadia Code", &self.settings.font_family),
+                iced::widget::text_input("Cascadia Code", &self.settings.font_family)
+                    .on_input(Message::FontFamilyChanged),
             ].spacing(8).align_y(iced::Alignment::Center),
             row![
                 text("Font Size:"),
-                iced::widget::text_input("14", &self.settings.font_size.to_string()),
+                iced::widget::text_input("14", &self.settings.font_size.to_string())
+                    .on_input(Message::FontSizeChanged),
             ].spacing(8).align_y(iced::Alignment::Center),
             row![
                 text("Default RTL Mode:"),
@@ -268,6 +440,14 @@ impl OmniConsole {
                         Message::UpdateSettings(s)
                     }),
             ].spacing(8).align_y(iced::Alignment::Center),
+            column![
+                text("Theme:"),
+                theme_buttons,
+            ].spacing(8),
+            column![
+                text("Default Shell Profile:"),
+                profile_buttons,
+            ].spacing(8),
         ].spacing(8);
         
         let buttons = row![
@@ -347,9 +527,15 @@ impl OmniConsole {
                 ..Default::default()
             });
 
-        let theme = AppTheme::dark();
+        let theme = self.get_active_theme();
         let font_size = self.settings.font_size;
         let theme_bg: iced::Color = theme.background.into();
+
+        let font_family_static = self.font_family_static;
+        let terminal_font = iced::Font {
+            family: iced::font::Family::Name(font_family_static),
+            ..Default::default()
+        };
 
         let terminal: Element<'_, Message> = if let Some(tab) = self.tabs.get(self.active_tab) {
             let visible_rows = tab.screen.buffer.rows as usize;
@@ -357,10 +543,15 @@ impl OmniConsole {
             let cursor_x = tab.screen.cursor.x as usize;
             let cursor_y = tab.screen.cursor.y as usize;
 
+            let total_lines = tab.screen.buffer.lines.len();
+            let viewport_top = total_lines.saturating_sub(visible_rows);
+            let scrolled_top = viewport_top.saturating_sub(tab.scroll_offset);
+
             let mut lines_vec: Vec<Element<'_, Message>> = Vec::new();
 
             for y in 0..visible_rows {
-                let line = match tab.screen.buffer.get_line(y) {
+                let line_idx = scrolled_top + y;
+                let line = match tab.screen.buffer.get_line(line_idx) {
                     Some(line) => line,
                     None => continue,
                 };
@@ -382,15 +573,21 @@ impl OmniConsole {
                         display_cell.cell.ch
                     };
 
+                    let use_font = if is_rtl_char(ch) {
+                        iced::Font::default()
+                    } else {
+                        terminal_font
+                    };
+
                     let cell = &display_cell.cell;
                     let (fg_color, _bg_color) = self.cell_colors(cell, &theme);
 
-                    let is_cursor = y == cursor_y && x == cursor_x && tab.screen.cursor.visible;
+                    let is_cursor = tab.scroll_offset == 0 && y == cursor_y && x == cursor_x && tab.screen.cursor.visible;
 
                     let rendered: Element<'_, Message> = if is_cursor {
                         // Cursor: white block with dark character
                         let cursor_char = if ch == ' ' { ' ' } else { ch };
-                        container(text(cursor_char.to_string()).size(font_size).color(iced::Color::from_rgb(0.0, 0.0, 0.0)))
+                        container(text(cursor_char.to_string()).size(font_size).font(use_font).color(iced::Color::from_rgb(0.0, 0.0, 0.0)))
                             .style(|_theme: &iced::Theme| iced::widget::container::Style {
                                 background: Some(iced::Color::from_rgb(0.9, 0.9, 0.9).into()),
                                 ..Default::default()
@@ -399,6 +596,7 @@ impl OmniConsole {
                     } else {
                         text(ch.to_string())
                             .size(font_size)
+                            .font(use_font)
                             .color(fg_color)
                             .into()
                     };
