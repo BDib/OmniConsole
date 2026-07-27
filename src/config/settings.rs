@@ -57,14 +57,32 @@ impl Settings {
         
         let config_file = config_dir.join("settings.toml");
         
-        if config_file.exists() {
+        let mut settings = if config_file.exists() {
             let content = std::fs::read_to_string(&config_file).unwrap_or_default();
             toml::from_str(&content).unwrap_or_default()
         } else {
             let settings = Settings::default();
             settings.save();
             settings
+        };
+
+        // Scan themes/ directory and append custom themes
+        if let Ok(entries) = std::fs::read_dir("themes") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        if let Ok(theme) = toml::from_str::<Theme>(&content) {
+                            if !settings.themes.iter().any(|t| t.name == theme.name) {
+                                settings.themes.push(theme);
+                            }
+                        }
+                    }
+                }
+            }
         }
+
+        settings
     }
 
     pub fn save(&self) {

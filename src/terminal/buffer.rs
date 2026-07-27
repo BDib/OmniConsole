@@ -48,6 +48,11 @@ impl Buffer {
         }
     }
 
+    pub fn actual_y(&self, y: usize) -> usize {
+        let viewport_top = self.lines.len().saturating_sub(self.rows as usize);
+        viewport_top + y
+    }
+
     pub fn get_line(&self, y: usize) -> Option<&Line> {
         self.lines.get(y)
     }
